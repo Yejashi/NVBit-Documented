@@ -1,61 +1,52 @@
-# Announcement
-We are working to enhance NVBit development and gain insights into its user base to better estimate the additional resources needed. Please take a moment to fill out this survey: [https://forms.cloud.microsoft/r/zd1Kx3g8iQ](https://forms.cloud.microsoft/r/zd1Kx3g8iQ) and share it with any NVBit users you know. Your input is greatly appreciated—thank you!
+# NVBit-Documented
 
-----
+Community-maintained, non-NVIDIA documentation for **NVBit 1.8**.
 
-NVBit 1.7 is released and contains several breaking changes. Please check the change log carefully.
+This repository documents the NVIDIA NVBit dynamic binary instrumentation
+SDK. It is **not** an official NVIDIA product and is maintained independently
+by the community.
 
-----
-NVBit is released as an artifact via github, it can be downloaded at: https://github.com/NVlabs/NVBit/releases
+## Scope
 
-A paper describing NVBit was published at MICRO 2019 and it can be found at: https://github.com/NVlabs/NVBit/releases/download/v1.0/MICRO_19_NVBit.pdf
+* **Target SDK:** NVBit 1.8
+* **Upstream repository:** [`NVlabs/NVBit`](https://github.com/NVlabs/NVBit)
+* **Authoritative source:** the official NVBit 1.8 GitHub Release artifact
 
-For business inquiries, please visit our website and submit the form: [NVIDIA Research Licensing](https://www.nvidia.com/en-us/research/inquiries/)
+All technical claims in this documentation are grounded in the NVBit 1.8
+release headers, source, and example tools.
 
-# NVBit (NVidia Binary Instrumentation Tool)
-NVIDIA Corporation
+## Documentation, not redistribution
 
-NVBit is covered by the same End User License Agreement as that of the
-NVIDIA CUDA Toolkit. By using NVBit you agree to End User License Agreement
-described in the EULA.txt file.
+This repository documents NVBit but **does not redistribute** the SDK.
 
-NVBit is not part of the official CUDA toolkit, but instead is a research prototype from the Architecture Research Group at NVIDIA and as such is provided as-is with no guarantee of support.
+* SDK archives, extracted SDK directories, binaries, and generated build
+  products are excluded from version control via `.gitignore`.
+* The SDK is acquired at build time through the scripts in `scripts/`.
+* Do not commit release archives, generated libraries, object files, or
+  Doxygen XML output.
 
-## Introduction
-NVBit (NVidia Binary Instrumentation Tool) is a research prototype of a dynamic
-binary instrumentation library for NVIDIA GPUs.
+## Building the documentation
 
-NVBit provides a set of simple APIs that enable writing a variety of
-instrumentation tools. Example of instrumentation tools are: dynamic
-instruction counters, instruction tracers, memory reference tracers,
-profiling tools, etc.
+The documentation is built with Sphinx, fed by Doxygen XML generated from
+NVBit 1.8 headers.
 
-NVBit allows writing instrumentation tools (which we call **NVBit tools**)
-that can inspect and modify the assembly code (SASS) of a GPU application
-without requiring recompilation, thus dynamic. NVBit allows instrumentation
-tools to inspect the SASS instructions of each function (\_\_global\_\_ or
-\_\_device\_\_) as it is loaded for the first time in the GPU. During this
-phase is possible to inject one or more instrumentation calls to arbitrary
-device functions before (or after) a SASS instruction. It is also possible to
-remove SASS instructions, although in this case NVBit does not guarantee that
-the application will continue to work correctly.
+```bash
+./scripts/build-docs.sh
+```
 
-NVBit tries to be as low overhead as possible, although any injection of
-instrumentation function has an associated cost due to saving and restoring
-application state before and after jumping to/from the instrumentation
-function.
+The script downloads the configured NVBit 1.8 release, extracts it into an
+ignored directory, runs Doxygen, then builds Sphinx HTML into `_build/`.
 
-Because NVBit does not require application source code, any pre-compiled GPU
-application should work regardless of which compiler (or version) has been
-used (i.e. nvcc, pgicc, etc).
+## Environment note
 
-## Requirements
+The NVBit 1.8 release requires a Linux x86_64 or aarch64 host with an
+NVIDIA GPU, CUDA >= 12, and GCC >= 8.5. This documentation repository is
+**not** an NVIDIA development environment. Commands shown in these pages
+that involve building or running NVBit tools are reference instructions
+only and must not be executed on a non-NVIDIA host.
 
-* SM compute capability:              >= 3.5 && <= 12.1
-* Host CPU:                           x86_64, aarch64
-* OS:                                 Linux
-* GCC version:                        >= 8.5.0 for x86_64; >= 8.5.0 for aarch64
-* CUDA version:                       >= 12.0
-* CUDA driver version:                <= 575.xx
-* nvcc version for tool compilation   >= 10.2
+## License
 
+NVBit is distributed under its own End User License Agreement (see
+`EULA.txt`). This documentation repository is licensed separately and does
+not convey any rights to the NVBit SDK itself.

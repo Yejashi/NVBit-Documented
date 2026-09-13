@@ -1,0 +1,89 @@
+# Project: NVBit-Documented
+# Project brief: Documentation for NVIDIA NVBit 1.8
+
+PROJECT_NAME           = NVBit
+PROJECT_NUMBER         = $(NVBIT_VERSION)
+PROJECT_BRIEF          = "NVIDIA NVBit Dynamic Binary Instrumentation SDK"
+
+# Output
+OUTPUT_DIRECTORY       = doxygen
+
+# Generate only XML (consumed by Breathe); suppress HTML/LaTeX.
+GENERATE_HTML          = NO
+GENERATE_LATEX         = NO
+GENERATE_XML           = YES
+XML_OUTPUT             = xml
+
+# Input: only the public NVBit headers under core/ and core/utils/.
+INPUT                  = $(NVBIT_SDK_DIR)/core \
+                       $(NVBIT_SDK_DIR)/core/utils
+
+# Filter to relevant header files only.
+FILE_PATTERNS          = *.h *.hpp
+
+# Exclude generated/binary content and test-apps/tools.
+EXCLUDE_PATTERNS       = */test-apps/* */tools/* */*/*.o */*/*.a */*/*.so */*/*.cubin */*/*.ptx
+
+# Do not recurse into binary or irrelevant directories.
+EXCLUDE                = $(NVBIT_SDK_DIR)/test-apps \
+                       $(NVBIT_SDK_DIR)/tools \
+                       $(NVBIT_SDK_DIR)/examples
+
+# Recurse into directories to find headers.
+RECURSIVE              = YES
+
+# Encoding.
+INPUT_ENCODING         = UTF-8
+
+# Strip code from documentation comments.
+STRIP_CODE_COMMENTS    = NO
+
+# Extract all members (public and protected); hide private implementation.
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = NO
+EXTRACT_PACKAGE        = NO
+EXTRACT_STATIC         = NO
+
+# Show included headers in documentation.
+SHOW_INCLUDE_FILES     = YES
+
+# Follow include directives.
+HAVE_DOT               = NO
+
+# Alphabetical class index.
+# Hide unused members in the XML.
+HIDE_UNDOC_MEMBERS     = YES
+HIDE_UNDOC_CLASSES     = YES
+
+# Brief descriptions.
+SHORT_NAMES            = NO
+
+# Generate a searchable index.
+GENERATE_TREEVIEW      = YES
+
+# Use the markdown parser for comments.
+MARKDOWN_SUPPORT       = YES
+
+# Output language.
+OUTPUT_LANGUAGE        = English
+
+# Generate XML suitable for Breathe.
+BRIEF_MEMBER_DESC      = YES
+REPEAT_BRIEF           = YES
+
+# Do not generate RTF or HTML.
+GENERATE_RTF           = NO
+GENERATE_MAN           = NO
+
+# Source code linking (disabled — we don't want to expose source).
+SOURCE_BROWSER         = NO
+INLINE_SOURCES         = NO
+
+# Avoid exposing internal SDK build artifacts.
+# Expand CUDA device qualifiers so Breathe sees standard C++ signatures.
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+PREDEFINED             = __device__= __noinline__= __global__=
+
+# Include path for external headers (already covered by INPUT above).
+INCLUDE_PATH           = $(NVBIT_SDK_DIR)/core $(NVBIT_SDK_DIR)/core/utils

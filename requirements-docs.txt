@@ -1,0 +1,7 @@
+# Documentation dependencies for NVBit-Documented
+# Target: NVBit 1.8
+
+sphinx>=7.0
+myst-parser>=2.0
+breathe>=4.35
+furo>=2023.0
