@@ -11,8 +11,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: "pages"
@@ -22,6 +20,10 @@ jobs:
   docs:
     name: Build docs
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -42,15 +44,21 @@ jobs:
       - name: Build documentation
         run: bash scripts/build-docs.sh
 
+      # Pages deployment is only needed for direct pushes to the documentation
+      # branch. Pull requests still validate the complete Sphinx/Doxygen build
+      # without requiring Pages deployment permissions or configuration.
       - name: Configure Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/documentation'
         uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/documentation'
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/_build/html
 
   deploy:
+    name: Deploy docs
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
