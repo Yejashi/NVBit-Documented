@@ -1,74 +1,172 @@
 # Instrumenting Memory Operations
 
-This guide walks through the instrumentation approach used by the
-`mem_trace` example tool, which instruments memory-reference operations
-in GPU kernels.
+This guide builds the reasoning behind a memory tracer similar to the shipped
+`mem_trace` tool.
 
 ## Goal
 
-Record every memory load and store executed by a kernel, including
-predicate state, opcode, memory address, and launch-time context.
+For each selected dynamic memory operation, record enough information to
+identify:
 
-## Step 1: Discover functions
+- the kernel/function and instruction;
+- opcode or instruction ID;
+- whether the instruction is predicated on;
+- the relevant memory-reference address;
+- the kernel launch;
+- optional lane/warp/thread information produced by the device routine.
 
-The tool uses `nvbit_get_related_functions()` to find all functions
-reachable from the kernel entry point(s) of interest. This ensures
-that memory operations in called device functions are also captured.
+## 1. Instrument the whole reachable scope
 
-## Step 2: Duplicate guard
+Start from the launched `CUfunction` and obtain related device functions:
 
-The tool maintains a `std::set` of function handles that have already
-been processed. Before instrumenting a function, it checks whether the
-function handle is already in the set. If so, the function is skipped.
-This prevents duplicate instrumentation when a function is reachable
-through multiple paths.
+```cpp
+std::vector<CUfunction> funcs =
+    nvbit_get_related_functions(ctx, entry);
+funcs.push_back(entry);
+```
 
-## Step 3: Get instructions
+Use an already-instrumented set so shared callees are processed only once.
 
-For each unique function, call `nvbit_get_instrs()` to obtain the list
-of decoded SASS instructions.
+## 2. Inspect decoded instructions
 
-## Step 4: Filter memory references
+For each unique function:
 
-Iterate over the instruction list and filter for memory-reference
-opcodes. The tool checks the opcode of each instruction to determine
-whether it performs a load or store.
+```cpp
+const std::vector<Instr*>& instrs =
+    nvbit_get_instrs(ctx, func);
+```
 
-## Step 5: Insert instrumentation calls
+The filter should be based on decoded instruction/operand properties. Decide
+which address spaces and instruction families your experiment includes.
 
-For each memory-reference instruction, insert a call to the device
-routine `instrument_mem` using `nvbit_insert_call()` with
-`IPOINT_BEFORE`. The call arguments include:
+A general-purpose tracer should make exclusions explicit rather than silently
+dropping instruction classes.
 
-* **Guard predicate** — ensures the instrumentation is only active when
-  the tool is enabled for the current context.
-* **Opcode** — the opcode of the memory instruction.
-* **Memory-address** — the effective address being accessed.
-* **Launch-value** — launch-time values (e.g., grid/block dimensions).
-* **Channel pointer** — a pointer to the `ChannelDev` object for
-  communication back to the host.
+## 3. Handle every relevant memory-reference operand
 
-## Step 6: Enable instrumentation
+Do not code the assumption "one memory instruction means one address."
 
-Call `nvbit_enable_instrumented()` to activate the instrumentation for
-the current context. NVBit will compile the modified GPU code with the
-injected calls.
+For each selected `Instr`, determine its memory-reference operands. If the
+analysis needs all of them, insert a record path for each one and pass that
+operand's index to `nvbit_add_call_arg_mref_addr64()`.
 
-## Launch-time values
+Modern 1.8 inherits fixes that removed an older incorrect fixed maximum on
+memory-reference operands. Write loops from the decoded instruction data, not
+from an obsolete constant.
 
-NVBit provides APIs to pass kernel launch parameters to device
-instrumentation routines. These values are set at kernel launch time
-and are available to the injected device routine during execution.
-Tools should limit inferences about launch-time value availability to
-the documented APIs.
+## 4. Insert the trace call
 
-## Caveats
+The sequence is conceptually:
 
-* The `mem_trace` example is one approach to memory instrumentation.
-  Other tools may use different filtering strategies or insertion
-  points.
-* Instrumentation adds overhead. The injected device routines execute
-  alongside the original kernel code, which may affect performance
-  measurements.
-* Do not infer universal behavior from this example. Each tool's
-  instrumentation strategy is independent.
+```cpp
+nvbit_insert_call(instr, "instrument_mem", IPOINT_BEFORE);
+nvbit_add_call_arg_guard_pred_val(instr);
+nvbit_add_call_arg_const_val32(instr, opcode_id);
+nvbit_add_call_arg_mref_addr64(instr, mref_idx);
+nvbit_add_call_arg_launch_val64(instr, 0);
+nvbit_add_call_arg_const_val64(
+    instr, reinterpret_cast<uint64_t>(channel_dev));
+```
+
+The actual upstream example includes its own record layout and supporting
+arguments. The important pattern is the separation between insertion and
+argument construction.
+
+## 5. Assign launch identity
+
+Before the kernel executes:
+
+```text
+nvbit_set_at_launch(ctx, func, launch_id, ...)
+nvbit_enable_instrumented(ctx, func, true)
+```
+
+Now every dynamic record can carry the launch ID without reinstrumenting the
+function.
+
+For graph launches, use the stream/launch-handle-aware path.
+
+## 6. Produce records on the GPU
+
+The device routine receives the dynamic address. It should return quickly for a
+predicated-off operation when such operations are excluded.
+
+Then it packages the desired fields and pushes the record through
+`ChannelDev`.
+
+Keep device records compact. Long strings such as SASS text should usually be
+mapped to an integer static ID.
+
+## 7. Consume on the host
+
+`ChannelHost` owns a receiver thread that drains records.
+
+The receiver can:
+
+- map IDs back to static instruction/function metadata;
+- aggregate counters;
+- write a binary trace;
+- feed another analysis pipeline.
+
+If parsing/file I/O is expensive, consider decoupling channel draining from
+heavy downstream work so the consumer can keep pace with the GPU.
+
+## 8. Address-space semantics
+
+A 64-bit effective address alone does not say whether an instruction targets
+global, shared, local, or another memory space.
+
+Persist sufficient static metadata to interpret the address later:
+
+```text
+instruction_id -> {
+    opcode,
+    memory space / operand role,
+    width,
+    function,
+    static PC
+}
+```
+
+Then dynamic records can remain compact.
+
+## 9. Coalescing is downstream analysis
+
+NVBit can give a tracer per-thread/lane effective addresses, but a GPU memory
+system does not necessarily issue one memory transaction for every lane.
+
+If your research question is cache/coalescing behavior, reconstruct requests
+at the appropriate granularity (warp/wave instruction plus memory line/sector)
+rather than treating every lane address as an independent cache access.
+
+That analysis belongs after collection unless the injected routine deliberately
+performs the aggregation on device.
+
+## 10. TMA is a separate branch
+
+TMA operations in NVBit 1.8 use TMA parameter handles and structured parsing.
+Do not force them through the ordinary MREF loop and call the result complete.
+
+See [Tracing TMA Operations](tma-tracing.md).
+
+## 11. Validate the tracer
+
+Use microbenchmarks where addresses are known analytically:
+
+- contiguous vector load/store;
+- stride-2/stride-N;
+- shared-memory access;
+- an instruction with multiple memory-reference operands if available;
+- TMA microbenchmark on supported hardware.
+
+Compare emitted addresses/counts with the kernel's expected indexing before
+using the tracer on large applications.
+
+## Performance caution
+
+Memory tracing can generate enormous data volumes and substantial overhead.
+The traced execution time is generally not a clean measurement of the
+uninstrumented kernel's memory performance.
+
+Use the trace to characterize behavior; use independent profiling/runs for
+timing unless you have quantified perturbation.

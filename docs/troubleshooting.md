@@ -1,161 +1,179 @@
 # Troubleshooting
 
-This page covers common issues encountered when building and using the
-NVBit-Documented documentation site.
+NVBit failures tend to fall into three groups: loading/build compatibility,
+callback/lifecycle mistakes, or incorrect instrumentation-data plumbing.
 
-## NVBit SDK configuration
+## Tool does not load
 
-### SDK not found
+### Symptom
 
-**Symptom:** Doxygen fails with "input file not found" errors.
+The target runs normally and no tool initialization output appears.
 
-**Cause:** The NVBit 1.8 release has not been downloaded or extracted.
+### Check
 
-**Fix:** Run `./scripts/build-docs.sh` to download and extract the SDK.
-Verify that the script's NVBit version configuration matches the
-expected release (1.8).
+- use an absolute path in `LD_PRELOAD` or `CUDA_INJECTION64_PATH`;
+- confirm the shared object exists and matches the host architecture;
+- inspect dynamic-library errors from the loader;
+- confirm the tool is linked against the intended NVBit release.
 
-### Wrong SDK version
+Do not debug instruction filters until you know the shared object actually
+loaded.
 
-**Symptom:** API references do not match the documented behavior.
+## Tool loads but no kernels are instrumented
 
-**Cause:** An older or newer SDK version is present in the build
-directory.
+Confirm:
 
-**Fix:** Remove any `nvbit-*` directories from the working tree and
-re-run the build script. The script will download the configured
-version.
+1. `nvbit_at_cuda_event` is reached;
+2. the callback ID corresponds to a kernel launch form the application uses;
+3. the launched `CUfunction` is recovered correctly;
+4. `nvbit_get_instrs` returns instructions;
+5. the filter selects at least one;
+6. `nvbit_enable_instrumented` is true for the launch.
 
-### SDK extraction path
+Log function names and selected static instruction counts before adding channel
+complexity.
 
-**Symptom:** Doxygen cannot locate headers.
+## Deadlock during context initialization
 
-**Cause:** The `Doxyfile` input paths do not match the extracted SDK
-directory structure.
+If the tool performs CUDA allocation in `nvbit_at_ctx_init`, move that
+allocation to `nvbit_tool_init`.
 
-**Fix:** Verify that the `Doxyfile` `INPUT` directives point to the
-correct `core/` subdirectory of the extracted SDK. Do not hardcode
-absolute paths; use relative paths from the project root.
+The NVBit header explicitly warns that CUDA memory allocation during context
+initialization can deadlock.
 
-## Doxygen generation
+Also review any CUDA runtime call that may lazily load a tool-owned helper
+kernel. Use the explicit tool-module APIs in 1.8 for helper kernels.
 
-### Doxygen not installed
+## Recursive or unexpected callbacks
 
-**Symptom:** `./scripts/build-docs.sh` fails at the Doxygen step.
+A receiver/helper pthread owned by the tool may be issuing CUDA operations and
+triggering the same callbacks used to observe the target.
 
-**Fix:** Install Doxygen:
+Register it with `nvbit_set_tool_pthread()`.
+
+Keep target-application and tool-internal CUDA work separate in logs.
+
+## Duplicate records
+
+If one static instruction appears to have two or more injected calls, check the
+already-instrumented guard.
+
+The same function may be:
+
+- launched repeatedly;
+- reachable from multiple entry kernels.
+
+Instrument a `CUfunction` once per appropriate context/lifetime.
+
+## Device routine receives garbage fields
+
+First compare the device function signature against the exact order of
+`nvbit_add_call_arg_*` calls.
+
+Common mistakes:
+
+- 32-bit constant paired with 64-bit parameter expectations;
+- address and launch-ID arguments reversed;
+- missing guard-predicate argument;
+- wrong variadic count;
+- treating a uniform register as a general register.
+
+## Memory addresses look incomplete
+
+Check whether the instruction has multiple memory-reference operands.
+
+Do not assume `mref_index = 0` is always sufficient. The 1.8 lineage removed
+older fixed-MREF assumptions; iterate decoded MREF operands.
+
+Also distinguish the effective address stream from cache transactions or
+coalesced requests.
+
+## Channel hangs during teardown
+
+Audit ownership/order:
+
+1. are producer kernels finished?
+2. is the final flush issued?
+3. is the receiver still alive to consume it?
+4. is the receiver joined before memory is freed?
+5. is the helper kernel/module valid in this context?
+
+A correct channel pipeline needs a synchronization protocol, not just a final
+sleep.
+
+## Receiver thread triggers CUDA callbacks
+
+Register the receiver with `nvbit_set_tool_pthread()` immediately after the
+channel/receiver is initialized.
+
+## Graph launches have wrong launch IDs
+
+For CUDA Graphs, do not reuse a non-graph assumption that one global value
+implicitly maps to the next kernel.
+
+Use `nvbit_at_graph_node_launch` and supply the stream/launch handle when
+setting graph-node-specific launch values.
+
+## TMA records cannot be parsed
+
+Verify:
+
+- the GPU is within the release's supported TMA scope (Hopper/Blackwell);
+- the instruction is classified through the TMA path;
+- `nvbit_add_call_arg_tma_param_handle_and_size` is used;
+- the complete handle bytes and size reach the host;
+- the full opcode/modifiers needed by the parser are preserved;
+- the same `CUcontext` is supplied to the host parser.
+
+Do not route a TMA record through the ordinary one-address MREF parser.
+
+## Runtime version mismatch
+
+If an API signature from an online tutorial differs from your build, stop and
+inspect the local 1.8 `core/nvbit.h`.
+
+Avoid combinations such as:
+
+```text
+1.8 libnvbit
++ copied 1.7 header
++ older channel.hpp
++ current example source
+```
+
+Use one release as a coherent SDK.
+
+## Documentation build: SHA mismatch
+
+`scripts/get-nvbit.sh` deletes the downloaded archive when its SHA-256 does not
+match the pinned digest.
+
+Possible causes include a partial/corrupt download or an upstream asset change.
+Do not simply update the digest to make the build green. Verify the official
+release asset first.
+
+## Documentation build: Breathe symbol missing
+
+A `doxygenfunction` or `doxygenfile` warning usually means:
+
+- Doxygen did not see the expected release header;
+- the symbol name is wrong for 1.8;
+- the Breathe path does not point to `doxygen/xml`.
+
+Run a clean build:
 
 ```bash
-# Debian/Ubuntu
-sudo apt install doxygen graphviz
-
-# Fedora
-sudo dnf install doxygen graphviz
+rm -rf .external doxygen docs/_build
+./scripts/build-docs.sh
 ```
 
-### Doxygen XML not generated
+Because CI uses `sphinx-build -W`, unresolved API directives must be fixed
+rather than ignored.
 
-**Symptom:** Breathe directives resolve to empty content.
+## Documentation build succeeds locally but not in CI
 
-**Cause:** Doxygen failed silently or XML output was not placed in the
-expected directory.
+Reproduce the clean path. A local extracted SDK or generated Doxygen tree can
+hide missing build dependencies or wrong paths.
 
-**Fix:** Run Doxygen manually to see error messages:
-
-```bash
-doxygen Doxyfile
-```
-
-Check that `doxygen/xml/` contains the expected XML files after
-execution.
-
-## Breathe integration
-
-### Breathe not installed
-
-**Symptom:** Sphinx build fails with "unknown directive: doxygenfile"
-or similar.
-
-**Fix:** Install Breathe and its dependencies:
-
-```bash
-pip install breathe sphinx
-```
-
-Ensure the version is compatible with your Sphinx installation.
-
-### Breathe cross-references unresolved
-
-**Symptom:** Sphinx build succeeds but cross-references between pages
-are broken.
-
-**Cause:** The `breathe_projects` configuration in `conf.py` does not
-point to the correct Doxygen XML output directory.
-
-**Fix:** Verify that `conf.py` contains:
-
-```python
-breathe_projects = {
-    "nvbit": "doxygen/xml/"
-}
-breathe_default_project = "nvbit"
-```
-
-Adjust the path if your Doxygen output is in a different location.
-
-### Missing API symbols
-
-**Symptom:** Some expected symbols do not appear in the generated API
-reference.
-
-**Cause:** The `Doxyfile` input set does not include the relevant
-headers, or the symbols are marked internal/private.
-
-**Fix:** Check the `Doxyfile` `INPUT` and `RECURSIVE` settings. Ensure
-the `core/` directory and its subdirectories are included. Symbols
-marked `@internal` or `@private` in Doxygen comments are excluded by
-default.
-
-## Sphinx build issues
-
-### Missing MyST extensions
-
-**Symptom:** Sphinx fails to parse Markdown files with `toctree`,
-`{note}`, or other MyST directives.
-
-**Fix:** Install the MyST Parser and required extensions:
-
-```bash
-pip install myst-parser sphinxcontrib-mermaid
-```
-
-### Theme not found
-
-**Symptom:** Sphinx build fails with "theme 'furo' not found".
-
-**Fix:** Install the Furo theme:
-
-```bash
-pip install furo
-```
-
-### Warnings as errors
-
-**Symptom:** The build fails due to documentation warnings.
-
-**Fix:** Run the build without the `--fail-on-warning` flag to see the
-warnings, then fix the underlying issues (broken cross-references,
-missing figures, etc.).
-
-## General advice
-
-* Always start with a clean build (`rm -rf _build/ doxygen/xml/`) when
-  troubleshooting persistent issues.
-* Check that all Python dependencies are installed at the versions
-  specified in `requirements-docs.txt`.
-* Verify that the NVBit 1.8 release artifact is intact and matches the
-  expected checksum (if a checksum is provided in the release notes).
-* If you encounter issues specific to the NVBit SDK itself (not the
-  documentation build), refer to the upstream
-  [`NVlabs/NVBit`](https://github.com/NVlabs/NVBit) repository or
-  the MICRO 2019 paper.
+The repository is considered reproducible only when a fresh checkout can
+download, verify, extract, and build without manual SDK placement.

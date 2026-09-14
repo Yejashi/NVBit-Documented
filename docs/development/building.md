@@ -1,79 +1,124 @@
 # Building the Documentation
 
-This page describes how to build the NVBit-Documented documentation
-site from a clean repository checkout.
+The documentation build is intentionally release-driven: a clean checkout
+downloads the exact NVBit 1.8 binary release artifact before API extraction.
 
-## Prerequisites
+## Requirements
 
-* Python 3 with `pip`
-* Node.js (for Mermaid diagram rendering, if used)
-* Graphviz (for architecture diagrams, if used)
+Install:
 
-## Documentation dependencies
+- Python 3;
+- Doxygen;
+- Graphviz;
+- the packages in `requirements-docs.txt`.
 
-Install the Python packages listed in `requirements-docs.txt`:
+For example on Ubuntu:
 
 ```bash
-pip install -r requirements-docs.txt
+sudo apt-get install doxygen graphviz
+python -m pip install -r requirements-docs.txt
 ```
 
-## Build process
+No NVIDIA GPU is required because the docs build does not execute CUDA.
 
-The build is orchestrated by `scripts/build-docs.sh`:
+## One-command build
+
+From the repository root:
 
 ```bash
 ./scripts/build-docs.sh
 ```
 
-The script performs the following steps:
+The script performs:
 
-1. Downloads the configured NVBit 1.8 release artifact.
-2. Extracts it into an ignored build directory.
-3. Runs Doxygen against the NVBit headers to generate XML output.
-4. Builds Sphinx HTML from the Markdown source files into `_build/`.
+```text
+scripts/get-nvbit.sh
+    |
+    +--> download configured 1.8 asset
+    +--> SHA-256 verification
+    +--> extract under .external/
+    |
+Doxygen
+    |
+    +--> parse release core headers
+    +--> write doxygen/xml
+    |
+Sphinx + MyST + Breathe
+    |
+    +--> handwritten Markdown
+    +--> generated API declarations
+    +--> docs/_build/html
+```
 
-## Clean build
+## Release configuration
 
-A clean build must be reproducible from a fresh checkout:
+`scripts/nvbit-release.env` is the single source for:
+
+- NVBit version;
+- release asset filename;
+- download URL;
+- SHA-256 digest;
+- extracted directory name.
+
+Changing the documented NVBit version is therefore a deliberate release update,
+not a silent "download latest" operation.
+
+## Clean rebuild
+
+To ensure no cached release or generated output is masking a problem:
 
 ```bash
-rm -rf _build/ doxygen/xml/ nvbit-*/
+rm -rf .external doxygen docs/_build
 ./scripts/build-docs.sh
 ```
 
-The script should not depend on:
+This should succeed without manually copying any NVBit files into the repo.
 
-* Manually extracted SDK directories
-* Absolute paths from a specific developer's machine
-* Cached Doxygen output
-* Accidentally committed generated files
+## Doxygen
 
-## What the build does (and does not do)
+`Doxyfile` points at the extracted release's `core/` headers and emits XML
+only. Breathe reads that XML during the Sphinx build.
 
-The documentation build:
+Do not commit Doxygen XML. Regenerate it from the pinned release.
 
-* **Does** process NVBit headers through Doxygen to generate API XML.
-* **Does** render Sphinx pages from MyST Markdown source.
-* **Does not** execute any CUDA code.
-* **Does not** build or run NVBit example tools.
-* **Does not** build or run the test applications.
+## Sphinx
 
-If you need to build and run NVBit tools, follow the instructions in
-the [Quick Start](../getting-started/quickstart.md) guide. Those
-instructions require an NVIDIA GPU and must not be executed on a
-non-NVIDIA host.
+The site uses:
 
-## CI scope
+- Sphinx;
+- MyST Parser for Markdown;
+- Breathe for Doxygen XML;
+- Furo for HTML presentation.
 
-The GitHub Actions workflow (`.github/workflows/docs.yml`) runs the
-documentation build on every push and pull request to the
-`documentation` branch. Its scope is limited to:
+CI runs `sphinx-build -W`, making warnings fatal. New pages should therefore
+be added to a toctree, links should resolve, and Breathe directives should name
+symbols that exist in the pinned release.
 
-1. Checking out the repository
-2. Installing documentation dependencies
-3. Downloading the NVBit 1.8 release
-4. Generating Doxygen XML
-5. Building Sphinx HTML
-6. Deploying to GitHub Pages
+## GitHub Actions
 
-The CI workflow does not execute CUDA code or build NVBit tools.
+The documentation workflow runs on pushes and pull requests targeting the
+`documentation` branch.
+
+For a direct push it:
+
+1. checks out the branch;
+2. installs Doxygen/Graphviz and Python dependencies;
+3. downloads/verifies/extracts NVBit 1.8;
+4. generates Doxygen XML;
+5. builds Sphinx;
+6. uploads/deploys the Pages artifact.
+
+A successful CI build is therefore also a validation that the pinned upstream
+release asset remains downloadable and matches the expected digest.
+
+## What CI does not validate
+
+The docs workflow does not:
+
+- compile every NVBit example;
+- run a CUDA application;
+- execute on every supported GPU architecture;
+- validate runtime semantics of a custom tool.
+
+Runtime claims should still be checked against the release source/examples and,
+where practical, exercised on supported NVIDIA hardware.

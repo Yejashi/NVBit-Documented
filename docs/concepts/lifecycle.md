@@ -1,60 +1,170 @@
 # Callback Lifecycle
 
-This page describes the NVBit callback mechanism and the set of
-callbacks declared in the core header.
+NVBit tools participate in the CUDA process through exported callback
+functions. A tool implements the callbacks it needs; it does not have to
+provide every callback.
 
-## Callback declarations
+The lifecycle matters because not every callback is a safe place to perform
+the same CUDA operation.
 
-All callback types are declared in `nvbit.h`. A tool registers
-callbacks by providing function pointers of the appropriate type during
-initialization.
+## Callback map
 
-The NVBit 1.8 API defines the following callbacks:
-
-| Callback | Trigger |
+| Callback | Role |
 |---|---|
-| `nvbit_at_init` | NVBit library initialization |
-| `nvbit_at_ctx_init` | CUDA context initialization |
-| `nvbit_tool_init` | Called before the first kernel launch |
-| `nvbit_at_cuda_event` | CUDA driver events (kernel launches, etc.) |
-| `nvbit_at_graph_node_launch` | CUDA Graph node launch |
-| `nvbit_at_ctx_term` | CUDA context termination |
-| `nvbit_at_term` | NVBit library termination |
+| `nvbit_at_init` | process/tool-library initialization |
+| `nvbit_at_ctx_init` | a CUDA context has been created |
+| `nvbit_tool_init` | tool setup before the first kernel launch in a context |
+| `nvbit_at_cuda_event` | entry/exit notification around CUDA driver events |
+| `nvbit_at_graph_node_launch` | a CUDA Graph kernel node is about to launch |
+| `nvbit_at_ctx_term` | context teardown |
+| `nvbit_at_term` | final tool/library teardown |
 
-## CUDA event callback
+The exact application event stream determines how often the context- and
+CUDA-event callbacks occur. Do not invent a single fixed global sequence for a
+multi-context application.
 
-The `nvbit_at_cuda_event` callback receives a flag indicating whether
-the event is an entry or exit point for a CUDA driver call:
+## `nvbit_at_init`
 
-* `is_exit = 0` — entry point (the driver call has not yet executed)
-* `is_exit = 1` — exit point (the driver call has completed)
+Use this for process-wide initialization that does not require a CUDA context,
+for example:
 
-## Execution order
+- parsing environment variables;
+- initializing process-wide mutexes;
+- opening configuration-independent host resources.
 
-The NVBit 1.8 API specifies trigger conditions for each callback but
-does not define a single total ordering among all callbacks. The
-ordering depends on the CUDA driver events that occur during the
-application lifecycle.
+Keep context-specific CUDA objects out of this stage because a context may not
+yet exist.
 
-General patterns:
+## `nvbit_at_ctx_init`
 
-* `nvbit_at_init` fires first, before any context or tool state is
-  created.
-* `nvbit_at_ctx_init` fires during context setup.
-* `nvbit_tool_init` is called before the first kernel launch.
-* `nvbit_at_cuda_event` fires for each relevant CUDA driver call.
-* `nvbit_at_graph_node_launch` fires when a graph node is launched.
-* `nvbit_at_ctx_term` fires during context teardown.
-* `nvbit_at_term` fires last, during library shutdown.
+This callback is the natural place to allocate the **host-side bookkeeping
+object** for a new `CUcontext`.
 
-## Example: instr_count
+A crucial NVBit rule is that CUDA memory allocation should not be performed
+from this callback. The 1.8 header warns that doing so can deadlock. If the
+tool needs managed/device allocation, defer it to `nvbit_tool_init`.
 
-The `instr_count` example tool implements three callbacks:
+A common pattern is:
 
-* `nvbit_at_init` — library-level setup
-* `nvbit_at_cuda_event` — intercepts CUDA events to count instructions
-* `nvbit_at_term` — finalization and output
+```text
+nvbit_at_ctx_init(ctx)
+    |
+    +--> allocate CTXstate on host
+    +--> insert ctx -> CTXstate in map
+    +--> record non-allocating metadata
+```
 
-It does not implement context-level or graph-launch callbacks. This
-demonstrates that tools select only the callbacks relevant to their
-analysis goals.
+## `nvbit_tool_init`
+
+This callback exists specifically for initialization that needs to occur once
+the context is ready for tool-side CUDA work. Channel-based tools typically use
+it to:
+
+- allocate managed/device channel state;
+- initialize `ChannelHost`;
+- start the receiver thread;
+- register that thread with `nvbit_set_tool_pthread()`;
+- finish context-specific resources that could not safely be initialized in
+  `nvbit_at_ctx_init`.
+
+Treat this callback as per-context initialization.
+
+## `nvbit_at_cuda_event`
+
+The signature includes:
+
+- the current `CUcontext`;
+- `is_exit`;
+- a CUDA callback ID;
+- an event name;
+- event-specific parameter data;
+- the CUDA result pointer.
+
+The fundamental timing rule is:
+
+- `is_exit == 0`: callback on driver-call entry;
+- `is_exit == 1`: callback on driver-call exit.
+
+For a kernel launch, entry is where a tool normally instruments the target
+function, sets launch-time values, and chooses the instrumented variant.
+Exit-side work is appropriate only when its synchronization assumptions are
+explicit.
+
+### Do not recursively instrument your own tool activity
+
+If a receiver or helper thread issues CUDA operations, register it with
+`nvbit_set_tool_pthread()`. NVBit then knows that CUDA events from that tool
+thread should not recursively enter the normal tool callbacks.
+
+This is especially important in channel-based tools.
+
+## `nvbit_at_graph_node_launch`
+
+CUDA Graphs separate graph construction/instantiation from individual node
+execution. NVBit exposes a graph-node launch callback carrying the function,
+stream, and a launch handle.
+
+The callback is primarily important when the tool uses
+`nvbit_set_at_launch()` and different graph nodes need different launch-time
+values. For graph launches, the stream and launch handle identify the concrete
+node launch to which that value belongs.
+
+See [CUDA Graphs](cuda-graphs.md).
+
+## `nvbit_at_ctx_term`
+
+Context termination is where per-context resources are drained and destroyed.
+
+A channel-based tool commonly needs to:
+
+1. stop creating new records;
+2. make sure outstanding kernel activity is complete according to the tool's
+   synchronization design;
+3. flush remaining channel records;
+4. stop/join the receiver;
+5. release device/managed allocations;
+6. unload or forget context-specific helper-module state;
+7. remove the context from the state map.
+
+Ordering matters. Freeing channel memory before the producer and receiver are
+finished creates use-after-free races.
+
+## `nvbit_at_term`
+
+Use final termination for process-wide output and resources that outlive all
+contexts. Do not rely on it as the only cleanup point for resources owned by a
+`CUcontext`.
+
+## A realistic lifecycle
+
+For a simple one-context application:
+
+```text
+tool shared object loaded
+        |
+nvbit_at_init
+        |
+CUDA context creation
+        |
+nvbit_at_ctx_init
+        |
+nvbit_tool_init
+        |
+        +---- kernel launch entry ----+
+        |     nvbit_at_cuda_event     |
+        |     instrument / enable     |
+        |                             |
+        |     GPU kernel executes     |
+        |                             |
+        |     launch exit             |
+        +-----------------------------+
+        |
+(possibly many more CUDA events)
+        |
+nvbit_at_ctx_term
+        |
+nvbit_at_term
+```
+
+CUDA Graphs, multiple contexts, libraries, and helper threads add branches to
+this picture; they do not remove the phase distinctions.
